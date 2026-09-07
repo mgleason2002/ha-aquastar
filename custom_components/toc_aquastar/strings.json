@@ -18,6 +18,13 @@
         "description": "Your Aquastar security token is no longer valid. Please enter a new one.",
         "title": "Re-authenticate Aquastar"
       },
+      "select_meter": {
+        "data": {
+          "meter_number": "Meter"
+        },
+        "description": "Multiple meters found on this account. Select which one to configure. You can add the integration again to configure additional meters.",
+        "title": "Select Meter"
+      },
       "user": {
         "data": {
           "sectoken": "Security Token"

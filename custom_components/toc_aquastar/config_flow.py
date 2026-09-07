@@ -15,6 +15,9 @@ from homeassistant.helpers.selector import (
     NumberSelector,
     NumberSelectorConfig,
     NumberSelectorMode,
+    SelectSelector,
+    SelectSelectorConfig,
+    SelectSelectorMode,
 )
 
 from .client import (
@@ -84,11 +87,12 @@ class AquastarConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
         if user_input is not None:
             sectoken = user_input[CONF_SECTOKEN].strip()
-            meter_number, error = await self._async_validate_sectoken(sectoken)
+            meters, error = await self._async_validate_sectoken(sectoken)
 
             if error:
                 errors["base"] = error
-            else:
+            elif len(meters) == 1:
+                meter_number = meters[0]
                 await self.async_set_unique_id(meter_number)
                 self._abort_if_unique_id_configured()
                 return self.async_create_entry(
@@ -98,10 +102,47 @@ class AquastarConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                         CONF_METER_NUMBER: meter_number,
                     },
                 )
+            else:
+                self._sectoken = sectoken
+                self._available_meters = meters
+                return await self.async_step_select_meter()
 
         return self.async_show_form(
             step_id="user",
             data_schema=STEP_USER_SCHEMA,
+            errors=errors,
+        )
+
+    async def async_step_select_meter(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Handle meter selection when multiple meters exist on the account."""
+        errors: dict[str, str] = {}
+
+        if user_input is not None:
+            meter_number = user_input[CONF_METER_NUMBER]
+            await self.async_set_unique_id(meter_number)
+            self._abort_if_unique_id_configured()
+            return self.async_create_entry(
+                title=f"Aquastar ({meter_number})",
+                data={
+                    CONF_SECTOKEN: self._sectoken,
+                    CONF_METER_NUMBER: meter_number,
+                },
+            )
+
+        return self.async_show_form(
+            step_id="select_meter",
+            data_schema=vol.Schema(
+                {
+                    vol.Required(CONF_METER_NUMBER): SelectSelector(
+                        SelectSelectorConfig(
+                            options=self._available_meters,
+                            mode=SelectSelectorMode.LIST,
+                        )
+                    )
+                }
+            ),
             errors=errors,
         )
 
@@ -120,11 +161,11 @@ class AquastarConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         if user_input is not None:
             sectoken = user_input[CONF_SECTOKEN].strip()
             reauth_entry = self._get_reauth_entry()
-            meter_number, error = await self._async_validate_sectoken(sectoken)
+            meters, error = await self._async_validate_sectoken(sectoken)
 
             if error:
                 errors["base"] = error
-            elif meter_number != reauth_entry.data[CONF_METER_NUMBER]:
+            elif reauth_entry.data[CONF_METER_NUMBER] not in meters:
                 errors["base"] = "meter_mismatch"
             else:
                 return self.async_update_reload_and_abort(
@@ -143,10 +184,12 @@ class AquastarConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
     async def _async_validate_sectoken(
         self, sectoken: str
-    ) -> tuple[str, None] | tuple[None, str]:
+    ) -> tuple[list[str], None] | tuple[None, str]:
         """Validate the sectoken by fetching recent data.
 
-        Returns (meter_number, None) on success, or (None, error_key).
+        Returns (meters, None) on success, where meters is an ordered list of
+        distinct meter numbers found in the results, or (None, error_key) on
+        failure.
         """
         try:
             end = datetime.now(ZoneInfo(TIMEZONE)).date()
@@ -157,7 +200,14 @@ class AquastarConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 _LOGGER.error("No readings returned during validation")
                 return None, "no_readings"
 
-            return readings[0].meter_number, None
+            seen: set[str] = set()
+            meters: list[str] = []
+            for r in readings:
+                if r.meter_number not in seen:
+                    seen.add(r.meter_number)
+                    meters.append(r.meter_number)
+
+            return meters, None
 
         except AuthenticationError:
             _LOGGER.error("Invalid sectoken")
