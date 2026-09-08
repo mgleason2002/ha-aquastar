@@ -147,10 +147,11 @@ class _FormData:
     menu: dict[str, str]
     date_fields: list[str]
     search_pjmr: str | None
+    selects: dict[str, list[str]]  # name → [option values], for meter/account pickers
 
     @classmethod
     def parse(cls, html: str) -> _FormData:
-        """Extract hidden fields, menu links, date inputs, and action PJMRs."""
+        """Extract hidden fields, menu links, date inputs, action PJMRs, and selects."""
         soup = BeautifulSoup(html, "html.parser")
 
         hidden: dict[str, str] = {}
@@ -185,12 +186,26 @@ class _FormData:
             if m:
                 search_pjmr = m.group(1)
 
+        # Parse SELECT elements — the portal uses these on multi-meter accounts
+        # to let the user choose which meter's data to display.
+        selects: dict[str, list[str]] = {}
+        for sel in soup.find_all("select"):
+            name = str(sel.get("name", ""))
+            if not name:
+                continue
+            options = [
+                str(opt.get("value", opt.get_text(strip=True)))
+                for opt in sel.find_all("option")
+            ]
+            selects[name] = [v for v in options if v.strip()]
+
         return cls(
             hidden=hidden,
             ext_fields=ext_fields,
             menu=menu,
             date_fields=date_fields,
             search_pjmr=search_pjmr,
+            selects=selects,
         )
 
 
@@ -260,6 +275,7 @@ async def download_usage(
     sectoken: str,
     start_date: date,
     end_date: date,
+    meter_number: str | None = None,
 ) -> list[WaterUsageReading]:
     """Fetch hourly water usage for the given date range.
 
@@ -267,9 +283,14 @@ async def download_usage(
     sequence:
       1. GET  with sectoken -> login, get session
       2. POST PJMR for "Water Usage by Hour" -> navigate to report
-      3. POST with dates -> server runs query, returns HTML table
+      3. POST with dates (and meter selection if provided) -> HTML table
 
     Both dates are inclusive.
+
+    When *meter_number* is provided the function looks for a SELECT field
+    on the report page whose options include that meter number and submits
+    it as part of the search POST, so the portal filters results to that
+    meter rather than defaulting to the primary account meter.
 
     Returns parsed WaterUsageReadings sorted ascending by timestamp.
     Raises AuthenticationError, CannotConnectError, or AquastarError.
@@ -284,7 +305,7 @@ async def download_usage(
             connector=connector,
             timeout=timeout,
         ) as session:
-            return await _fetch(session, sectoken, start_date, end_date)
+            return await _fetch(session, sectoken, start_date, end_date, meter_number)
     except aiohttp.ClientResponseError as err:
         raise AquastarError(f"HTTP {err.status}: {err.message}") from err
     except (TimeoutError, OSError) as err:
@@ -296,6 +317,7 @@ async def _fetch(
     sectoken: str,
     start_date: date,
     end_date: date,
+    meter_number: str | None = None,
 ) -> list[WaterUsageReading]:
     # Step 1: GET with sectoken (login)
     login_url = f"{RUN_URL}&sectoken={quote(sectoken, safe='')}"
@@ -335,6 +357,28 @@ async def _fetch(
     end_str = (end_date + timedelta(days=1)).strftime("%m/%d/%Y")
 
     fields = _base_fields(p2.hidden, p2.search_pjmr)
+
+    # On multi-meter accounts the report page has a SELECT element listing
+    # meter numbers.  Submit the desired meter so the server filters results
+    # to that meter rather than defaulting to the primary account meter.
+    if meter_number and p2.selects:
+        meter_field = next(
+            (name for name, options in p2.selects.items() if meter_number in options),
+            None,
+        )
+        if meter_field:
+            _LOGGER.debug(
+                "Selecting meter %s via field %s", meter_number, meter_field
+            )
+            fields.append((meter_field, meter_number))
+            fields.append(("PJ_Ext_Fld", meter_field))
+        else:
+            _LOGGER.debug(
+                "Meter %s not found in any SELECT field; available selects: %s",
+                meter_number,
+                {k: v for k, v in p2.selects.items()},
+            )
+
     fields.append((p2.date_fields[0], start_str))
     fields.append(("PJ_Ext_Fld", p2.date_fields[0]))
     fields.append((p2.date_fields[1], end_str))

@@ -353,11 +353,33 @@ class AquastarCoordinator(DataUpdateCoordinator[None]):
         return filtered
 
     async def _async_backfill(self) -> list[WaterUsageReading]:
-        """Fetch all available historical data in a single request."""
+        """Fetch all available historical data in monthly chunks.
+
+        The portal caps the number of rows returned in a single request.
+        On multi-meter accounts a large date range fills the row budget with
+        the primary meter's data, leaving no room for secondary meters.
+        Fetching in 30-day chunks keeps each request well below the limit so
+        all meters are represented in every response.
+        """
         today = datetime.now(_TZ).date()
         start = today - timedelta(days=BACKFILL_DAYS)
-        _LOGGER.debug("Backfill fetching %s to %s", start, today)
-        return self._filter_readings(await download_usage(self._sectoken, start, today))
+        all_readings: list[WaterUsageReading] = []
+        chunk_start = start
+        chunk_days = 30
+
+        _LOGGER.debug(
+            "Backfill fetching %s to %s in %d-day chunks", start, today, chunk_days
+        )
+        while chunk_start <= today:
+            chunk_end = min(chunk_start + timedelta(days=chunk_days - 1), today)
+            chunk_readings = await download_usage(
+                self._sectoken, chunk_start, chunk_end, self.meter_number
+            )
+            all_readings.extend(self._filter_readings(chunk_readings))
+            chunk_start = chunk_end + timedelta(days=1)
+
+        all_readings.sort(key=lambda r: r.timestamp)
+        return all_readings
 
     async def _async_incremental_fetch(
         self, last_stat: Mapping[str, Sequence[Mapping[str, Any]]]
@@ -376,5 +398,5 @@ class AquastarCoordinator(DataUpdateCoordinator[None]):
         if start > today:
             return []
         _LOGGER.debug("Incremental fetching %s to %s", start, today)
-        readings = await download_usage(self._sectoken, start, today)
+        readings = await download_usage(self._sectoken, start, today, self.meter_number)
         return self._filter_readings([r for r in readings if r.timestamp > cutoff])
