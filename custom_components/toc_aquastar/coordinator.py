@@ -224,7 +224,7 @@ class AquastarCoordinator(DataUpdateCoordinator[None]):
                 _LOGGER.debug(
                     "Inserting %d cost statistics (sum=%.2f)",
                     len(cost_statistics),
-                    cost_statistics[-1].get("sum", 0),
+                    cost_statistics[-1].sum or 0,
                 )
                 async_add_external_statistics(
                     self.hass, self._cost_metadata, cost_statistics
@@ -333,7 +333,7 @@ class AquastarCoordinator(DataUpdateCoordinator[None]):
             "Inserting %d statistics (consumption_sum=%.0f, cost_sum=%.2f)",
             len(consumption_statistics),
             consumption_sum,
-            cost_statistics[-1].get("sum", 0),
+            cost_statistics[-1].sum or 0,
         )
         async_add_external_statistics(
             self.hass, self._consumption_metadata, consumption_statistics
